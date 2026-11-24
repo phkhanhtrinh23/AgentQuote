@@ -185,4 +185,4 @@ AgentQuote/
 
 ## License
 
-MIT. See [LICENSE](LICENSE). External datasets, platforms and model APIs keep their own terms.
+MIT. See [LICENSE](LICENSE).
