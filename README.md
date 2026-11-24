@@ -2,7 +2,7 @@
 
 AgentQuote prices a data-agent session before it runs. For one request on a pay-as-you-go platform such as Earth Engine or BigQuery, it returns a quote: an upper bound on platform compute, LLM tokens and wall time, and all three bounds hold together with a probability you choose. It then picks the cheapest agent configuration whose quote fits your budget, with a certified cap on the share of requests that end up wrong or over their quote. If no configuration qualifies, it declines.
 
-An agent does not run its plan once. It looks up the catalogue, inspects data, fails, repairs and retries, and the platform bills every one of those calls. A price for a single clean run misses most of that spend. AgentQuote prices the clean run with a domain adapter and then imagines the rest of the session with a world model learned from logged sessions.
+An agent does not run its plan once. It looks up the catalogue, inspects data, fails, repairs and retries, and the platform bills every one of those calls. A price for a single clean run misses most of that spend. AgentQuote prices the clean run with a domain adapter and imagines the rest of the session with a world model learned from logged sessions.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ Certified choice (error-risk score + Learn-then-Test threshold)
 Report: quote per configuration, chosen configuration or decline
 ```
 
-The conformal score of a session is its largest ratio of realised cost to estimate across meters. One quantile of that score scales every estimate, so the three bounds hold jointly, not one at a time. The choice threshold is tested on a held-out set with fixed-sequence binomial tests, so the risk cap holds with high probability over that set.
+A session's conformal score is its largest ratio of realised cost to estimate across meters. One quantile of that score scales every estimate, so the three bounds hold jointly, not one at a time. The choice threshold is tested on held-out sessions with fixed-sequence binomial tests, so the risk cap holds with high probability.
 
 ## Installation
 
@@ -49,25 +49,20 @@ conda create -n agentquote python=3.12 pip -y
 conda activate agentquote
 ```
 
-Clone the repository and install it from its root:
+Clone the repository and install the dependencies from its root:
 
 ```sh
 git clone git@github.com:phkhanhtrinh23/AgentQuote.git
 cd AgentQuote
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m pip install -e .
 ```
 
-[requirements.txt](requirements.txt) lists NumPy, SciPy, pandas, scikit-learn, LightGBM, Matplotlib and sqlglot. To collect sessions on the live platforms, also install the extras:
-
-```sh
-python -m pip install -e ".[live]"
-```
+[requirements.txt](requirements.txt) lists NumPy, SciPy, pandas, scikit-learn, LightGBM, Matplotlib and sqlglot, plus the OpenAI client and the Google Cloud clients for live collection.
 
 ### API keys
 
-Live collection needs an LLM endpoint and a Google Cloud project. Create a local `.env` file using [.env.example](.env.example) as a reference:
+Create a local `.env` file using [.env.example](.env.example) as a reference:
 
 ```sh
 cp .env.example .env
@@ -82,9 +77,11 @@ GOOGLE_CLOUD_PROJECT=your-project
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 ```
 
-Any OpenAI-compatible endpoint works. `LOCAL_BACKBONES` routes the listed backbones to a local server such as vLLM.
+Replace the placeholders with your own key and project. `OPENROUTER_BASE_URL` can point to any compatible provider, and `LOCAL_BACKBONES` sends the listed backbones to a local server such as vLLM. Keys are only needed to collect live sessions.
 
 ## Data Sources
+
+See [data/README.md](data/README.md) for how to build request sets and collect sessions from the sources below.
 
 | Source | What it provides |
 |---|---|
@@ -94,47 +91,59 @@ Any OpenAI-compatible endpoint works. `LOCAL_BACKBONES` routes the listed backbo
 | [Sen1Floods11](https://github.com/cloudtostreet/Sen1Floods11) | Hand-labelled flood chips with event dates |
 | [Natural Earth](https://www.naturalearthdata.com/) | Country shapes for drawing analysis regions |
 
-Place the files under `data_cache/` (for example `data_cache/spider2/spider2-lite`, `data_cache/cbgb/eval_set.csv`, `data_cache/univearth/data.json`). The loaders in [agentquote/live/](agentquote/live/) list the exact paths.
+The built-in testbeds generate metered Earth Engine and BigQuery sessions in the same format, so no download is needed to run the pipeline.
 
-No downloads are needed to try the method. The built-in testbeds generate metered Earth Engine and BigQuery sessions in the same log format.
+### Input format for logged sessions
 
-### Session log format
-
-Each line of `sessions.jsonl` is one session of one configuration on one request. It holds the drafter's turn and compiled plan, the exploration steps, every attempt with its outcome, executed plan and metered calls, the inspections between attempts, the final answer and its error against the reference. Each turn records input and output tokens, observation size and latency. Each platform call records its metered cost. See [agentquote/types.py](agentquote/types.py).
+- **Requests:** `data/<platform>/requests.jsonl`, one request per line with its unit (region or database), type, text, candidate configurations and optional reference.
+- **Sessions:** `data/<platform>/sessions.jsonl`, one session per line for one configuration on one request: the draft, exploration steps, attempts with outcomes and metered calls, inspections, and the final answer with its error.
+- **Meters:** every turn records input and output tokens, observation size and latency. Every platform call records its metered cost.
 
 ## Running
 
-Run the whole pipeline:
+Run the whole pipeline from the repository root:
 
 ```sh
-bash run_all.sh             # full run, 1-2 hours
-QUICK=1 bash run_all.sh     # smaller pools, 2 random splits, 200 rollouts, about 5 minutes
+bash run_all.sh
 ```
 
-This generates session pools on both testbeds, fits AgentQuote and the baselines over random splits, runs every analysis and draws the figures. Results go to `results/`: one JSON file per analysis and platform, `summary.md` with the main tables, and `figures/`.
+It runs the tests, generates session pools on both testbeds, fits and calibrates AgentQuote and the baselines over random unit splits, runs every analysis and draws the figures. A full run takes 1 to 2 hours. `QUICK=1 bash run_all.sh` runs the same pipeline on smaller pools in about 5 minutes.
 
-Run single steps:
+The run writes to `results/`:
+
+- `<platform>/quotes.json`: joint and per-meter coverage, width and miss of every quoting method, and paired width reductions
+- `<platform>/choice.json`: risk, cost, admissibility and declines of every choice rule
+- `<platform>/ablation.json`, `shift.json`, `sensitivity.json`, `breakdown.json`, `efficiency.json`, `case.json`
+- `summary.md`: the main tables
+- `figures/`: PDF and PNG figures
+
+To run one analysis on sessions already in `data/`:
 
 ```sh
-python scripts/generate_testbed.py --out data
 python -m agentquote.experiments prepare --data data --out results
 python -m agentquote.experiments quotes  --data data --out results
 ```
 
-Tasks: `breakdown`, `quotes`, `choice`, `ablation`, `shift`, `efficiency`, `sensitivity`, `case`, `figures`. Each takes `--assign` (number of random splits) and `--n-roll` (rollouts per configuration).
+Tasks are `breakdown`, `quotes`, `choice`, `ablation`, `shift`, `efficiency`, `sensitivity`, `case`, `figures` and `all`. `prepare` fits and caches every split once, so later tasks reuse it.
 
-### Collecting real sessions
+To run on your own logged sessions instead of the testbeds:
 
 ```sh
-python scripts/build_ee_requests.py --out data/earthengine
-python scripts/collect_sessions.py --platform earthengine --out data/earthengine --max-usd 50
-python scripts/collect_sessions.py --platform bigquery    --out data/bigquery    --max-usd 50
 SKIP_GENERATE=1 bash run_all.sh
 ```
 
-Collection spends real money. It stops at `--max-usd` and resumes where it left off.
+Other flags:
 
-### Using it in code
+- `--assign`: number of random unit splits (default 10).
+- `--n-roll`: imagined rollouts per configuration (default 1,000).
+- `--platform`: `earthengine`, `bigquery` or `all`.
+- `--seed`: base random seed.
+
+`run_all.sh` reads the same settings from `ASSIGN`, `NROLL`, `SCALE` (testbed pool size), `DATA`, `OUT` and `PY`.
+
+[`Settings`](agentquote/config.py) holds the error levels (α = 0.1, δ = 0.2, η = 0.1), the error tolerance τ = 0.1, the attempt and turn caps, and the model sizes. Platform and token prices are in the same file.
+
+To use AgentQuote from Python:
 
 ```python
 from agentquote.adapters import get_adapter
@@ -145,9 +154,9 @@ cal = aq.calibrate(aq.estimate(quote_sessions, rng), aq.estimate(choice_sessions
 quotes, choice = aq.quote_and_choose(aq.estimate(candidates, rng), cal, budget)
 ```
 
-To add a platform, subclass [`DomainAdapter`](agentquote/adapters/base.py): a compiler, operator classes, prices and outcome classes. The world model, quote and choice stay the same.
+To add a platform, subclass [`DomainAdapter`](agentquote/adapters/base.py) with a compiler, operator classes, prices and outcome classes. The world model, quote and choice stay the same.
 
-[`Settings`](agentquote/config.py) holds the defaults: α = 0.1, δ = 0.2, η = 0.1, τ = 0.1, 1,000 rollouts, at most 5 attempts and 50 turns. Platform and token prices are in the same file.
+Live collection stops once spend passes `--max-usd`. The session in progress finishes first, so the total can go over the cap by up to one session. Each session's exact spend is logged.
 
 ## Project Structure
 
@@ -167,6 +176,7 @@ AgentQuote/
 │   └── types.py           requests, plans and session logs
 ├── scripts/               generate, collect and summarize
 ├── tests/                 unit tests
+├── data/                  guide to preparing session data
 ├── run_all.sh             end-to-end run
 ├── requirements.txt       Python dependencies
 ├── .env.example           template for API keys and cloud project
